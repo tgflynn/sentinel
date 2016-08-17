@@ -27,7 +27,7 @@ from classes import Proposal, Superblock
 from dashd import CTransaction, rpc_command
 
 PAYMENT_ADDRESS1 = "yNaE8Le2MVwk1zpwuEKveTMCEQHVxdcfCS"
-PAYMENT_AMOUNT1 = "100"
+PAYMENT_AMOUNT1 = "0.127"
 
 PAYMENT_ADDRESS2 = "'ydE7B1A7htNwSTvvER6xBdgpKZqNDbbEhPydE7B1A7htNwSTvvER6xBdgpKZqNDbbEhP'"
 PAYMENT_AMOUNT2 = "23"
