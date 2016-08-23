@@ -18,7 +18,7 @@ import cmd
 import misc
 import libmysql
 import config
-#import crontab
+import crontab
 import cmd, sys
 import govtypes
 import random 
@@ -27,8 +27,10 @@ import time
 import datetime
 import binascii
 import calendar
+import hashlib
+import re
 
-#from governance import GovernanceObject, GovernanceObjectMananger, Setting, Event
+from governance import Event
 #from classes import Proposal, Superblock
 from dashd import CTransaction, rpc_command
 
@@ -47,12 +49,39 @@ PROPOSAL_QUORUM = 0
 
 DB = libmysql.connect(config.hostname, config.username, config.password, config.database)
 
+def computeHashValue( data ):
+    m = hashlib.sha256()
+    m.update( data )
+    hex = m.hexdigest()
+    return int( hex, 16 )
 
 def getGovernanceObjects():
     result = rpc_command( "gobject list" )
     #print "result = ", result
     govobjs = json.loads( result )
     return govobjs
+
+def getMasternodes():
+    result = rpc_command( "masternodelist full" )
+    #print "result = ", result
+    rec = json.loads( result )
+    #print "rec = ", rec
+    return rec
+
+def getMyVin():
+    result = rpc_command( "masternode status" )
+    rec = json.loads( result )
+    #print "rec = ", rec
+    if 'vin' not in rec:
+        return None
+    vinstr = rec['vin']
+    #print "vinstr = ", vinstr
+    m = re.match( r'^\s*CTxIn\(COutPoint\(\s*([0-9a-fA-F]+)\s*,\s*(\d+)\s*\).*$', vinstr )
+    if m is None:
+        print "No match"
+        return None
+    vin = m.group( 1 ) + "-" + m.group( 2 )
+    return vin.strip()
 
 def getBlockCount():
     result = rpc_command( "getblockcount" )
@@ -63,6 +92,11 @@ def getSuperblockCycle():
     # For now return the testnet value
     #return 24
     return 5
+
+def getCurrentBlockHash():
+    height = getBlockCount()
+    result = rpc_command( "getblockhash %d" % ( height ) )
+    return result
 
 def createGovernanceObject( objRec ):
     dstr = objRec['DataString']
@@ -89,6 +123,7 @@ class GovernanceObject:
         self.object_parent_hash = 0
         self.object_type = 0
         self.object_fee_tx = ''
+        self.object_data = binascii.hexlify(json.dumps([]))
         self.absolute_yes_count = 0
         self.yes_count = 0
         self.no_count = 0
@@ -511,8 +546,10 @@ class CreateSuperblockTask(SentinelTask):
     def __init__( self ):
         SentinelTask.__init__( self )
         self.event_block_height = 0
+        self.superblock = None
 
     def run( self ):
+        self.superblock = None
         height = getBlockCount()
         cycle = getSuperblockCycle()
         diff = height % cycle
@@ -520,16 +557,66 @@ class CreateSuperblockTask(SentinelTask):
         print "CreateSuperblockTask: height = %d, cycle = %d, diff = %d" % ( height, cycle, diff )
         if ( cycle - diff ) != SUPERBLOCK_CREATION_DELTA:
             return
+        # Check if we've already created this superblock
         if self.superblockCreated():
             return
         proposals = self.getNewProposalsRanked()
         self.createSuperblock( proposals )
+        if self.isElected():
+            self.submitSuperblock()
+
+    def isElected( self ):
+        """Determine if we are the winner of the current superblock creator election"""
+        blockHashVal = computeHashValue( getCurrentBlockHash() )
+        myvin = getMyVin()
+        if myvin is None:
+            # If we're not a master we can't be elected
+            print "isElected: We're not a masternode, returning False"
+            return False
+        masternodes = getMasternodes()
+        candidates = []
+        for vin, mnstring in masternodes.items():
+            fields = filter( lambda x: x != '', [ f.strip() for f in re.split( r'\s+', mnstring ) ] )
+            if fields[0] != 'ENABLED':
+                continue
+            mnHashVal = computeHashValue( vin )
+            diff = abs( mnHashVal - blockHashVal )
+            crec = { 'vin': vin, 'value': diff }
+            candidates.append( crec )
+        candidates.sort( key = lambda x: x['value'] )
             
+        if len( candidates ) < 1:
+            print "isElected: No candidates, returning False"
+            return False
+
+        electedVin = candidates[0]['vin']
+
+        print "isElected: electedVin = ", electedVin
+
+        if electedVin == myvin:
+            print "isElected: We're elected, returning True"
+            return True
+
+        print "isElected: We're not elected, returning False"
+        return False
+
+    def submitSuperblock( self ):
+        """Submit the superblock we created to the network"""
+        if self.superblock is None:
+            return
+        # We just need to submit the event.  The ProcessEvents task
+        # will do the rest of the work.
+        event = Event()
+        event.create_new( self.superblock.id )
+        event.save()
+        libmysql.db.commit()
+        self.superblock.object_status = "SUBMITTED-LOCAL"
+        
     def superblockCreated( self ):
         sql = "select object_status, event_block_height from governance_object, superblock where "
         sql += "governance_object.id = superblock.governance_object_id and "
         sql += "event_block_height = %s and "
-        sql += "object_status = 'NEW-LOCAL' "
+        sql += "( object_status = 'NEW-LOCAL' or object_status = 'SUBMITTED-LOCAL' )"
         c = libmysql.db.cursor()
         c.execute( sql, self.event_block_height )
         rows = c.fetchall()
@@ -581,14 +668,24 @@ class CreateSuperblockTask(SentinelTask):
         superblock.object_status = "NEW-LOCAL"
         superblock.event_block_height = self.event_block_height
         superblock.store()
+        self.superblock = superblock
 
-class VoteSuperblocksTask:
+class VoteSuperblocksTask(SentinelTask):
 
     def __init__( self ):
         SentinelTask.__init__( self )
 
     def run( self ):
         pass
+
+class ProcessEventsTask(SentinelTask):
+
+    def __init__( self ):
+        SentinelTask.__init__( self )
+
+    def run( self ):
+        crontab.prepare_events()
+        crontab.submit_events()
 
 def testSentinel1():
     print "testSentinel1: Start"
@@ -597,6 +694,7 @@ def testSentinel1():
     taskList.addTask( UpdateGovernanceTask() )
     taskList.addTask( CreateSuperblockTask() )
     sentineld.addTask( taskList )
+    sentineld.addTask( ProcessEventsTask() )
     sentineld.run()
 
 if __name__ == "__main__":
@@ -605,5 +703,9 @@ if __name__ == "__main__":
     
     for (key,gobj) in govobjs.items():
         print "key = ", key
+
+    getMasternodes()
+
+    print "My VIN: ", getMyVin()
 
     testSentinel1()
