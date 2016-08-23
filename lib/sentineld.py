@@ -190,6 +190,9 @@ class GovernanceObject:
         hexdata = binascii.hexlify( self.getJSON() )
         return hexdata
         
+    def updateObjectData( self ):
+        self.object_data = self.getJSONHex()
+
     def loadJSONFields( self, rec ):
         objpair = json.loads( binascii.unhexlify( rec['DataHex'] ) )[0]
         objrec = objpair[1]
@@ -597,8 +600,10 @@ class CreateSuperblockTask(SentinelTask):
             print "isElected: We're elected, returning True"
             return True
 
-        print "isElected: We're not elected, returning False"
-        return False
+        #print "isElected: We're not elected, returning False"
+        #return False
+        print "isElected: We're not elected, returning True for testing"
+        return True
 
     def submitSuperblock( self ):
         """Submit the superblock we created to the network"""
@@ -667,6 +672,7 @@ class CreateSuperblockTask(SentinelTask):
         superblock.payment_amounts = payment_amounts
         superblock.object_status = "NEW-LOCAL"
         superblock.event_block_height = self.event_block_height
+        superblock.updateObjectData()
         superblock.store()
         self.superblock = superblock
 
