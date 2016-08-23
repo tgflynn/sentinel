@@ -16,7 +16,10 @@ CREATE TABLE `governance_object` (
   `object_revision` int(20) NOT NULL DEFAULT '0',
   `object_data` text NOT NULL,
   `object_fee_tx` varchar(255) NOT NULL DEFAULT '',
-  `object_status` varchar(255) NOT NULL DEFAULT '' 
+  `object_status` varchar(255) NOT NULL DEFAULT '',
+  `absolute_yes_count` int(11) NOT NULL DEFAULT 0,
+  `yes_count` int(11) NOT NULL DEFAULT 0,
+  `no_count` int(11) NOT NULL DEFAULT 0,
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8;
 

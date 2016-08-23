@@ -25,7 +25,8 @@ import random
 import json 
 import time
 import datetime
-
+import binascii
+import calendar
 
 #from governance import GovernanceObject, GovernanceObjectMananger, Setting, Event
 #from classes import Proposal, Superblock
@@ -37,17 +38,19 @@ GOVERNANCE_UPDATE_PERIOD_SECONDS = 30
 
 # Number of blocks before a superblock to create superblock objects for
 # auto vote.
-SUPERBLOCK_CREATION_DELTA = 10
+#SUPERBLOCK_CREATION_DELTA = 10
+SUPERBLOCK_CREATION_DELTA = 1
 
 # Minimum number of absolute yes votes to include a proposal in a superblock
-PROPOSAL_QUORUM = 10
+#PROPOSAL_QUORUM = 10
+PROPOSAL_QUORUM = 0
 
 DB = libmysql.connect(config.hostname, config.username, config.password, config.database)
 
 
 def getGovernanceObjects():
     result = rpc_command( "gobject list" )
-    print "result = ", result
+    #print "result = ", result
     govobjs = json.loads( result )
     return govobjs
 
@@ -58,7 +61,8 @@ def getBlockCount():
 def getSuperblockCycle():
     # TODO: Add dashd rpc call for this
     # For now return the testnet value
-    return 24
+    #return 24
+    return 5
 
 def createGovernanceObject( objRec ):
     dstr = objRec['DataString']
@@ -75,12 +79,26 @@ def createGovernanceObject( objRec ):
 class GovernanceObject:
 
     def __init__( self, name ):
-        for cname in self.getColumns():
-            self.__dict__[cname] = None
+        self.makeFields( GovernanceObject )
         self.object_name = name
         self.object_revision = govtypes.FIRST_REVISION
         self.subtype = None
+        self.parent_id = 0
+        self.object_creation_time = calendar.timegm( time.gmtime() )
+        self.object_hash = 0
+        self.object_parent_hash = 0
+        self.object_type = 0
+        self.object_fee_tx = ''
+        self.absolute_yes_count = 0
+        self.yes_count = 0
+        self.no_count = 0
+        self.object_status = 'UNKNOWN'
 
+    def makeFields( self, cls ):
+        columns = cls.getColumns()
+        for cname in columns:
+            self.__dict__[cname] = None
+        
     @staticmethod
     def getTableName():
         return "governance_object"
@@ -138,8 +156,8 @@ class GovernanceObject:
         return hexdata
         
     def loadJSONFields( self, rec ):
-        objpair = json.loads( binascii.unhexlify( rec['DataHex'] ) )
-        objrec = objrec[1]
+        objpair = json.loads( binascii.unhexlify( rec['DataHex'] ) )[0]
+        objrec = objpair[1]
         columns = self.getColumns()
         localColumns = self.getLocalColumns()
         for cname in columns:
@@ -158,32 +176,35 @@ class GovernanceObject:
             obj[cname] = getattr( self, cname )
         return obj
 
-    def getMemberSQL( self, name ):
-        if name not in self.getColumns():
+    def getMemberSQL( self, cls, name ):
+        if name not in cls.getColumns():
             raise Exception( "GovernanceObject.getMemberSQL: ERROR Unknown field name: %s" % ( name ) )
         value = self.__dict__[name]
         if value is None:
             return "NULL"
         return value
 
-    def getSelectList( self ):
+    @classmethod
+    def getSelectList( cls ):
         selectList = ""
-        columns = self.getColumns()
-        for i in range( len( self.getColumns() ) ):
+        columns = cls.getColumns()
+        for i in range( len( cls.getColumns() ) ):
             cname = columns[i]
             selectList += cname
             if i < ( len( columns ) - 1 ):
                 selectList += ", "
         return selectList
 
-    def getSelectSQL( self ):
-        sql = "select " + getSelectList()
-        sql += " from " + self.getTableName() + " "
+    @classmethod
+    def getSelectSQL( cls ):
+        sql = "select " + cls.getSelectList()
+        sql += " from " + cls.getTableName() + " "
         return sql
 
-    def getInsertSQL( self ):
-        sql = "insert into %s ( " % ( self.getTableName() )
-        columns = self.getColumns()
+    @classmethod
+    def getInsertSQL( cls ):
+        sql = "insert into %s ( " % ( cls.getTableName() )
+        columns = cls.getColumns()
         for i in range( 1, len( columns ) ):
             cname = columns[i]
             sql += cname
@@ -197,9 +218,10 @@ class GovernanceObject:
         sql += " )"
         return sql
 
-    def getUpdateSQL( self ):
-        columns = self.getColumns()
-        sql = "update %s set " % ( self.getTableName() )
+    @classmethod
+    def getUpdateSQL( cls ):
+        columns = cls.getColumns()
+        sql = "update %s set " % ( cls.getTableName() )
         for i in range( 1, len( columns ) ):
             cname = columns[i]
             sql += cname + " = %s"
@@ -208,19 +230,22 @@ class GovernanceObject:
         sql += " where id = %s"
         return sql
 
-    def getInstanceData( self ):
+    def getInstanceData( self, cls ):
         data = []
-        columns = self.getColumns()
+        columns = cls.getColumns()
+        #print "getIntanceData: cls = %s, class = %s, columns = %s" % ( cls, self.__class__, columns )
+        #print "dir(self) = ", dir( self )
         for cname in columns[1:]:
-            data.append( self.getMemberSQL( cname ) )
+            data.append( self.getMemberSQL( cls, cname ) )
         return data
 
     def existsInDb( self ):
-        if self.hash.empty():
+        if len( self.object_hash ) < 1:
             return False
-        sql = self.getSelectSQL() + " where object_hash = %s"
+        sql = GovernanceObject.getSelectSQL() + " where object_hash = %s"
+        #print "existsInDb: sql = ", sql
         c = libmysql.db.cursor()
-        c.execute( sql, ( self.hash ) )
+        c.execute( sql, ( self.object_hash ) )
         result = c.fetchone()
         c.close()
         if result is None:
@@ -231,31 +256,40 @@ class GovernanceObject:
             return True
 
     def store( self ):
-        self.storeInternal()
+        # Overridden in subclasses
+        pass
 
     def load( self ):
-        self.loadInternal()
+        # Overridden in subclasses
+        pass
 
-    def storeInternal( self ):
+    def storeInternal( self, cls ):
         if self.id is None:
-            sql = self.getInsertSQL()
+            sql = cls.getInsertSQL()
         else:
-            sql = self.getUpdateSQL()
-        data = self.getInstanceData()
+            sql = cls.getUpdateSQL()
+        data = self.getInstanceData( cls )
         c = libmysql.db.cursor()
+        print "GovernanceObject.storeInternal: sql = ", sql
+        print "GovernanceObject.storeInternal: data = ", data
         c.execute( sql, data )
+        insertId = libmysql.db.insert_id()
         c.close()
+        libmysql.db.commit()
+        return insertId
 
-    def loadInternal( self ):
+    def loadInternal( self, cls ):
         if self.id is None:
             raise( Exception( "GovernanceObject.loadInternal: ERROR id is NULL" ) )
-        sql = self.getSelectSQL()
-        sql += "where %s" % ( self.getIdColumn() )
+        sql = cls.getSelectSQL()
+        sql += "where %s" % ( cls.getIdColumn() )
         sql += " = %s"
         c = libmysql.db.cursor()
         c.execute( sql, ( self.id ) )
         row = c.fetchone()
-        columns = self.getColumns()
+        if row is None:
+            raise( Exception( "GovernanceObject.loadInternal: ERROR row not found for id = %s" % ( self.id ) ) )
+        columns = cls.getColumns()
         if len( row ) != len( columns ):
             raise( Exception( "GovernanceObject.loadInternal: ERROR incorrect row length" ) )
         for i in range( len( columns ) ):
@@ -269,15 +303,20 @@ class Superblock(GovernanceObject):
 
     def __init__( self, name ):
         GovernanceObject.__init__( self, name )
+        self.makeFields( Superblock )
         self.subtype = govtypes.trigger
         self.tableName = "superblock"
+        self.superblock_name = ''
+        self.event_block_height = 0
+        self.payment_addresses = ''
+        self.payment_amounts = ''
 
     @staticmethod
-    def getTableName( self ):
+    def getTableName():
         return "superblock"
 
     @staticmethod
-    def getColumns( self ):
+    def getColumns():
         columns = [ 'id', 
                     'governance_object_id',
                     'superblock_name',
@@ -287,7 +326,7 @@ class Superblock(GovernanceObject):
         return columns
 
     @staticmethod
-    def getLocalColumns( self ):
+    def getLocalColumns():
         localColumns = frozenset( [ 'id',
                                     'governance_object_id',
                                     'superblock_name' ] )
@@ -298,12 +337,17 @@ class Superblock(GovernanceObject):
         return 'governance_object_id'
 
     def store( self ):
-        GovernanceObject.storeInternal( self )
-        self.storeInternal()
+        insertId = self.storeInternal( GovernanceObject )
+        if self.governance_object_id is None:
+            self.governance_object_id = insertId
+        self.storeInternal( Superblock )
+        if self.id is None:
+            self.id = insertId
+        self.governance_id = self.id
 
     def load( self ):
-        GovernanceObject.storeInternal( self )
-        self.loadInternal()
+        self.loadInternal( GovernanceObject )
+        self.loadInternal( Superblock )
 
     def isValid( self ):
         return False
@@ -312,15 +356,21 @@ class Proposal(GovernanceObject):
 
     def __init__( self, name ):
         GovernanceObject.__init__( self, name )
+        self.makeFields( Proposal )
         self.subtype = govtypes.proposal
         self.tableName = "proposal"
+        self.proposal_name = ''
+        self.start_epoch = 0
+        self.end_epoch = 0
+        self.payment_address = ''
+        self.payment_amount = 0
 
     @staticmethod
-    def getTableName( self ):
+    def getTableName():
         return "proposal"
 
     @staticmethod
-    def getColumns( self ):
+    def getColumns():
         columns = [ 'id', 
                     'governance_object_id',
                     'proposal_name',
@@ -331,7 +381,7 @@ class Proposal(GovernanceObject):
         return columns
 
     @staticmethod
-    def getLocalColumns( self ):
+    def getLocalColumns():
         localColumns = frozenset( [ 'id',
                                     'governance_object_id',
                                     'proposal_name' ] )
@@ -342,15 +392,20 @@ class Proposal(GovernanceObject):
         return 'governance_object_id'
 
     def store( self ):
-        GovernanceObject.storeInternal( self )
-        self.storeInternal()
+        insertId = self.storeInternal( GovernanceObject )
+        if self.governance_object_id is None:
+            self.governance_object_id = insertId            
+        self.storeInternal( Proposal )
+        if self.id is None:
+            self.id = insertId
 
     def load( self ):
-        GovernanceObject.loadInternal( self )
-        self.loadInternal()
+        self.loadInternal( GovernanceObject )
+        self.loadInternal( Proposal )
 
     def isValid( self ):
-        return False
+        # TODO: Returning true for initial testing
+        return True
 
 class GovernanceFactory:
 
@@ -385,6 +440,7 @@ class SentinelDaemon:
         self.tasks.append( task )
 
     def runTasks( self ):
+        print "SentinelDaemon.runTasks: Running tasks"
         for task in self.tasks:
             if task.isReady():
                 task.run()
@@ -410,7 +466,7 @@ class SentinelTask:
     def run( self ):
         pass
 
-class SentinelTaskList:
+class SentinelTaskList(SentinelTask):
 
     """Represents a list of tasks tha should be run sequentially in order"""
 
@@ -423,9 +479,9 @@ class SentinelTaskList:
 
     def run( self ):
         for task in self.taskList:
-            self.task.run()
+            task.run()
     
-class UpdateGovernanceTask:
+class UpdateGovernanceTask(SentinelTask):
 
     def __init__( self ):
         SentinelTask.__init__( self, GOVERNANCE_UPDATE_PERIOD_SECONDS )
@@ -434,40 +490,61 @@ class UpdateGovernanceTask:
         govobjs = getGovernanceObjects()
         newobjs = []
         for key, rec in govobjs.items():
-            subtype = rec['DataString'][0]
+            #print "rec = ", rec
+            #print "DataString:", rec['DataString']
+            datarec = json.loads( rec['DataString'] )[0]
+            subtype = datarec[0]
             name = rec['Name']
             govobj = GFACTORY.create( subtype, name )
             govobj.loadJSON( rec )
             if not govobj.existsInDb():
                 newobjs.append( govobj )
+        print "UpdateGovernanceTask.run len( newobjs ) = ", len( newobjs )
         for obj in newobjs:
             if not obj.isValid():
                 continue
             obj.object_status = "NEW-REMOTE"
-            obj.save()
+            obj.store()
 
-class CreateSuperblockTask:
+class CreateSuperblockTask(SentinelTask):
 
     def __init__( self ):
         SentinelTask.__init__( self )
+        self.event_block_height = 0
 
     def run( self ):
         height = getBlockCount()
         cycle = getSuperblockCycle()
         diff = height % cycle
+        self.event_block_height = height + diff
+        print "CreateSuperblockTask: height = %d, cycle = %d, diff = %d" % ( height, cycle, diff )
         if ( cycle - diff ) != SUPERBLOCK_CREATION_DELTA:
+            return
+        if self.superblockCreated():
             return
         proposals = self.getNewProposalsRanked()
         self.createSuperblock( proposals )
             
+    def superblockCreated( self ):
+        sql = "select object_status, event_block_height from governance_object, superblock where "
+        sql += "governance_object.id = superblock.governance_object_id and "
+        sql += "event_block_height = %s and "
+        sql += "object_status = 'NEW-LOCAL' "
+        c = libmysql.db.cursor()
+        c.execute( sql, self.event_block_height )
+        rows = c.fetchall()
+        if len( rows ) > 0:
+            return True
+        return False
+
     def getNewProposalsRanked( self ):
         govTable = GovernanceObject.getTableName()
         propTable = Proposal.getTableName()
         sql = "select "
-        sql += "%s.id, %s.object_status, %s.absolute_yes_count " % ( proptable, govTable, govTable )
+        sql += "%s.governance_object_id, %s.object_status, %s.absolute_yes_count " % ( propTable, govTable, govTable )
         sql += "from %s, %s " % ( propTable, govTable )
         sql += "where %s.id = %s.governance_object_id and " % ( govTable, propTable )
-        sql += "object_status = NEW_REMOTE and "
+        sql += "object_status = 'NEW-REMOTE' and "
         sql += "%s.absolute_yes_count >= %s " % ( govTable, PROPOSAL_QUORUM )
         sql += "ORDER BY %s.absolute_yes_count " % ( govTable )
         c = libmysql.db.cursor()
@@ -480,25 +557,29 @@ class CreateSuperblockTask:
         return proposals
 
     def createSuperblock( self, proposals ):
+        print "createSuperblock: Start, len( proposals ) = ", len( proposals )
         payments = []
         for proposal in proposals:
             payment = { 'address': proposal.payment_address,
                         'amount': proposal.payment_amount }
             payments.append( payment )
-        sbname = "sb" + str(random.randint(1000000, 9999999))
+        sbname = "sb" + str( random.randint(1000000, 9999999) )
         superblock = GFACTORY.create( 'trigger', sbname )
         payment_addresses = ""
         payment_amounts = ""
         for i in range( len( payments ) ):
             payment = payments[i]
             payment_addresses += payment['address']
-            payment_amounts += payment['amount']
+            payment_amounts += str( payment['amount'] )
             if i < ( len( payments ) - 1 ):
                 payment_addresses += "|"
                 payment_amounts += "|"
-        superblock.payment_address = payment_addresses
+        print "createSuperblock: payment_addresses = ", payment_addresses
+        print "createSuperblock: payment_amounts = ", payment_amounts
+        superblock.payment_addresses = payment_addresses
         superblock.payment_amounts = payment_amounts
-        superblock.object_status = "LOCAL"
+        superblock.object_status = "NEW-LOCAL"
+        superblock.event_block_height = self.event_block_height
         superblock.store()
 
 class VoteSuperblocksTask:
@@ -509,6 +590,14 @@ class VoteSuperblocksTask:
     def run( self ):
         pass
 
+def testSentinel1():
+    print "testSentinel1: Start"
+    sentineld = SentinelDaemon()
+    taskList = SentinelTaskList( GOVERNANCE_UPDATE_PERIOD_SECONDS )
+    taskList.addTask( UpdateGovernanceTask() )
+    taskList.addTask( CreateSuperblockTask() )
+    sentineld.addTask( taskList )
+    sentineld.run()
 
 if __name__ == "__main__":
 
@@ -516,3 +605,5 @@ if __name__ == "__main__":
     
     for (key,gobj) in govobjs.items():
         print "key = ", key
+
+    testSentinel1()
