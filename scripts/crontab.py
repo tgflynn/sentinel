@@ -73,12 +73,13 @@ def reset():
     clear_proposals()	
 
 def prepare_events():
-    sql = "select id from event where start_time < NOW() and error_time = 0 and prepare_time = 0 limit 1"
+    sql = "select id from event where start_time < NOW() and error_time = 0 and prepare_time = 0"
 
-    libmysql.db.query(sql)
-    res = libmysql.db.store_result()
-    row = res.fetch_row()
-    if row:
+    c = libmysql.db.cursor()
+    c.execute( sql )
+    rows = c.fetchall()
+
+    for row in rows:
         event = Event()
         event.load(row[0])
 
@@ -116,12 +117,13 @@ def prepare_events():
 
 
 def submit_events():
-    sql = "select id from event where start_time < NOW() and prepare_time < NOW() and prepare_time > 0 and submit_time = 0 limit 1"
+    sql = "select id from event where start_time < NOW() and prepare_time < NOW() and prepare_time > 0 and submit_time = 0"
 
-    libmysql.db.query(sql)
-    res = libmysql.db.store_result()
-    row = res.fetch_row()
-    if row:
+    c = libmysql.db.cursor()
+    c.execute( sql )
+    rows = c.fetchall()
+
+    for row in rows:
         event = Event()
         event.load(row[0])
 
