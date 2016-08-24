@@ -47,6 +47,12 @@ SUPERBLOCK_CREATION_DELTA = 1
 #PROPOSAL_QUORUM = 10
 PROPOSAL_QUORUM = 0
 
+# For testing, set to True in production
+ENABLE_PROPOSAL_VALIDATION = False
+
+# For testing, set to True in production
+ENABLE_SUPERBLOCK_VALIDATION = True
+
 DB = libmysql.connect(config.hostname, config.username, config.password, config.database)
 
 def computeHashValue( data ):
@@ -388,7 +394,27 @@ class Superblock(GovernanceObject):
         self.loadInternal( Superblock )
 
     def isValid( self ):
-        return False
+        if not ENABLE_SUPERBLOCK_VALIDATION:
+            return True
+        sql = "select governance_object_id, object_status from superblock, governance_object where "
+        sql += "event_block_height = %s and "
+        sql += "( object_status = 'NEW-LOCAL' or object_status = 'SUBMITTED-LOCAL' )"
+        c = libmysql.db.cursor()
+        c.execute( sql, self.event_block_height )
+        rows = c.fetchall()
+        if len( rows ) != 1:
+            # Something's wrong if this query returns more than 1 row and if it returns
+            # no rows we have nothing to validate against so return False in both cases
+            return False
+        row = rows[0]
+        localSuperblock = GFACTORY.createFromTable( 'trigger', row[0] )
+        if localSuperblock.event_block_height != self.event_block_height:
+            return False
+        if localSuperblock.payment_addresses != self.payment_addresses:
+            return False
+        if localSuperblock.payment_amounts != self.payment_amounts:
+            return False
+        return True
 
 class Proposal(GovernanceObject):
 
@@ -442,7 +468,19 @@ class Proposal(GovernanceObject):
         self.loadInternal( Proposal )
 
     def isValid( self ):
-        # TODO: Returning true for initial testing
+        if not ENABLE_PROPOSAL_VALIDATION:
+            return True
+        # Check name
+        if not re.match( r'^[a-zA-Z0-9]+$', self.proposal_name ):
+            return False
+        now = calendar.timegm( time.gmtime() )
+        if self.end_epoch <= now:
+            return False
+        if self.end_epoch <= self.start_epoch:
+            return False
+        # TODO
+        #  - Check that payment_address is a valid base58 encoded non-multisig Dash address
+        #  - Check that payment_amount < budget allocation
         return True
 
 class GovernanceFactory:
