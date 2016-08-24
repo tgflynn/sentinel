@@ -1,5 +1,16 @@
 
 /*
+  DROP TABLES to facilitate development and testing
+  TODO: Determine if this should be removed for production
+*/
+DROP TABLE IF EXISTS `governance_object`;
+DROP TABLE IF EXISTS `proposal`;
+DROP TABLE IF EXISTS `superblock`;
+DROP TABLE IF EXISTS `event`;
+DROP TABLE IF EXISTS `action`;
+DROP TABLE IF EXISTS `setting`;
+
+/*
   DATABASE TABLES
 
 */
