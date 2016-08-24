@@ -53,6 +53,9 @@ ENABLE_PROPOSAL_VALIDATION = False
 # For testing, set to True in production
 ENABLE_SUPERBLOCK_VALIDATION = True
 
+OBJECT_TYPE_MAP = { govtypes.trigger: "trigger", govtypes.proposal: "proposal" }
+OBJECT_TYPE_REVERSE_MAP = { "trigger": govtypes.trigger, "proposal": govtypes.proposal }
+
 DB = libmysql.connect(config.hostname, config.username, config.password, config.database)
 
 def computeHashValue( data ):
@@ -189,8 +192,10 @@ class GovernanceObject:
 
     def getJSON( self ):
         obj = self.getJSONFields()
-        objpair = [ self.subtype, obj ]
-        return json.dumps( objpair, sort_keys = True )
+        objpair = [( OBJECT_TYPE_MAP[self.subtype], obj )]
+        jsonData = json.dumps( objpair, sort_keys = True )
+        print "getJSON: jsonData = ", jsonData
+        return jsonData
 
     def getJSONHex( self ):
         hexdata = binascii.hexlify( self.getJSON() )
@@ -212,6 +217,8 @@ class GovernanceObject:
 
     def getJSONFields( self ):
         obj = {}
+        # Used by dashd to determine object type
+        obj['type'] = self.subtype
         columns = self.getColumns()
         localColumns = self.getLocalColumns()
         for cname in columns:
