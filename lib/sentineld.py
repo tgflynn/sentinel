@@ -30,7 +30,7 @@ import calendar
 import hashlib
 import re
 
-from governance import Event
+#from governance import Event
 #from classes import Proposal, Superblock
 from dashd import CTransaction, rpc_command
 
@@ -119,7 +119,138 @@ def createGovernanceObject( objRec ):
     else:
         raise( Exception( "createGovernanceObject: ERROR: Unknown subtype: %s" % ( subtype ) ) )
 
-class GovernanceObject:
+class DBObject:
+
+    def __init__( self ):
+        pass
+
+    def makeFields( self, cls ):
+        columns = cls.getColumns()
+        for cname in columns:
+            self.__dict__[cname] = None
+
+    @staticmethod
+    def getTableName():
+        return "default"
+
+    @staticmethod
+    def getColumns():
+        columns = []
+        return columns
+
+    @classmethod
+    def getColumnSet( cls ):
+        return frozenset( cls.getColumns() )
+
+    @staticmethod
+    def getIdColumn():
+        return ''
+
+    @classmethod
+    def getSelectList( cls ):
+        selectList = ""
+        columns = cls.getColumns()
+        for i in range( len( cls.getColumns() ) ):
+            cname = columns[i]
+            selectList += cname
+            if i < ( len( columns ) - 1 ):
+                selectList += ", "
+        return selectList
+
+    @classmethod
+    def getSelectSQL( cls ):
+        sql = "select " + cls.getSelectList()
+        sql += " from " + cls.getTableName() + " "
+        return sql
+
+    @classmethod
+    def getInsertSQL( cls ):
+        sql = "insert into %s ( " % ( cls.getTableName() )
+        columns = cls.getColumns()
+        for i in range( 1, len( columns ) ):
+            cname = columns[i]
+            sql += cname
+            if i < ( len( columns ) - 1 ):
+                sql += ", "
+        sql += " ) values( "
+        for i in range( 1, len( columns ) ):
+            sql += "%s"
+            if i < ( len( columns ) - 1 ):
+                sql += ", "
+        sql += " )"
+        return sql
+
+    @classmethod
+    def getUpdateSQL( cls ):
+        columns = cls.getColumns()
+        sql = "update %s set " % ( cls.getTableName() )
+        for i in range( 1, len( columns ) ):
+            cname = columns[i]
+            sql += cname + " = %s"
+            if i < ( len( columns ) - 1 ):
+                sql += ", "
+        sql += " where id = %s"
+        return sql
+
+    def getMemberSQL( self, cls, name ):
+        if name not in cls.getColumns():
+            raise Exception( "DBObject.getMemberSQL: ERROR Unknown field name: %s" % ( name ) )
+        value = self.__dict__[name]
+        if value is None:
+            return "NULL"
+        return value
+
+    def getInstanceData( self, cls ):
+        data = []
+        columns = cls.getColumns()
+        #print "getIntanceData: cls = %s, class = %s, columns = %s" % ( cls, self.__class__, columns )
+        #print "dir(self) = ", dir( self )
+        for cname in columns[1:]:
+            data.append( self.getMemberSQL( cls, cname ) )
+        return data
+
+    def store( self ):
+        # Overridden in subclasses
+        pass
+
+    def load( self ):
+        # Overridden in subclasses
+        pass
+
+    def storeInternal( self, cls ):
+        data = self.getInstanceData( cls )
+        if self.id is None:
+            sql = cls.getInsertSQL()
+        else:
+            sql = cls.getUpdateSQL()
+            data.append( self.id )
+        c = libmysql.db.cursor()
+        print "DBObject.storeInternal: sql = ", sql
+        print "DBObject.storeInternal: data = ", data
+        c.execute( sql, data )
+        insertId = libmysql.db.insert_id()
+        c.close()
+        libmysql.db.commit()
+        return insertId
+
+    def loadInternal( self, cls ):
+        if self.id is None:
+            raise( Exception( "DBObject.loadInternal: ERROR id is NULL" ) )
+        sql = cls.getSelectSQL()
+        sql += "where %s" % ( cls.getIdColumn() )
+        sql += " = %s"
+        c = libmysql.db.cursor()
+        c.execute( sql, ( self.id ) )
+        row = c.fetchone()
+        if row is None:
+            raise( Exception( "DBObject.loadInternal: ERROR row not found for id = %s" % ( self.id ) ) )
+        columns = cls.getColumns()
+        if len( row ) != len( columns ):
+            raise( Exception( "DBObject.loadInternal: ERROR incorrect row length" ) )
+        for i in range( len( columns ) ):
+            setattr( self, columns[i], row[i] )
+
+class GovernanceObject(DBObject):
 
     def __init__( self, name ):
         self.makeFields( GovernanceObject )
@@ -137,12 +268,18 @@ class GovernanceObject:
         self.yes_count = 0
         self.no_count = 0
         self.object_status = 'UNKNOWN'
-
-    def makeFields( self, cls ):
-        columns = cls.getColumns()
-        for cname in columns:
-            self.__dict__[cname] = None
         
+    @staticmethod
+    def getObjectType( object_id ):
+        sql = "select object_type from governance_object where id = %s"
+        c = libmysql.db.cursor()
+        c.execute( sql, ( object_id ) )
+        row = c.fetchone()
+        c.close()
+        if row is None:
+            return None
+        return row[0]
+
     @staticmethod
     def getTableName():
         return "governance_object"
@@ -165,8 +302,8 @@ class GovernanceObject:
                     'object_status' ]
         return columns
 
-    @staticmethod
-    def getColumnSet():
+    @classmethod
+    def getColumnSet( cls ):
         return frozenset( self.getColumns() )
 
     @staticmethod
@@ -227,69 +364,6 @@ class GovernanceObject:
             obj[cname] = getattr( self, cname )
         return obj
 
-    def getMemberSQL( self, cls, name ):
-        if name not in cls.getColumns():
-            raise Exception( "GovernanceObject.getMemberSQL: ERROR Unknown field name: %s" % ( name ) )
-        value = self.__dict__[name]
-        if value is None:
-            return "NULL"
-        return value
-
-    @classmethod
-    def getSelectList( cls ):
-        selectList = ""
-        columns = cls.getColumns()
-        for i in range( len( cls.getColumns() ) ):
-            cname = columns[i]
-            selectList += cname
-            if i < ( len( columns ) - 1 ):
-                selectList += ", "
-        return selectList
-
-    @classmethod
-    def getSelectSQL( cls ):
-        sql = "select " + cls.getSelectList()
-        sql += " from " + cls.getTableName() + " "
-        return sql
-
-    @classmethod
-    def getInsertSQL( cls ):
-        sql = "insert into %s ( " % ( cls.getTableName() )
-        columns = cls.getColumns()
-        for i in range( 1, len( columns ) ):
-            cname = columns[i]
-            sql += cname
-            if i < ( len( columns ) - 1 ):
-                sql += ", "
-        sql += " ) values( "
-        for i in range( 1, len( columns ) ):
-            sql += "%s"
-            if i < ( len( columns ) - 1 ):
-                sql += ", "
-        sql += " )"
-        return sql
-
-    @classmethod
-    def getUpdateSQL( cls ):
-        columns = cls.getColumns()
-        sql = "update %s set " % ( cls.getTableName() )
-        for i in range( 1, len( columns ) ):
-            cname = columns[i]
-            sql += cname + " = %s"
-            if i < ( len( columns ) - 1 ):
-                sql += ", "
-        sql += " where id = %s"
-        return sql
-
-    def getInstanceData( self, cls ):
-        data = []
-        columns = cls.getColumns()
-        #print "getIntanceData: cls = %s, class = %s, columns = %s" % ( cls, self.__class__, columns )
-        #print "dir(self) = ", dir( self )
-        for cname in columns[1:]:
-            data.append( self.getMemberSQL( cls, cname ) )
-        return data
-
     def existsInDb( self ):
         if len( self.object_hash ) < 1:
             return False
@@ -306,46 +380,6 @@ class GovernanceObject:
             self.id = result[0]
             return True
 
-    def store( self ):
-        # Overridden in subclasses
-        pass
-
-    def load( self ):
-        # Overridden in subclasses
-        pass
-
-    def storeInternal( self, cls ):
-        if self.id is None:
-            sql = cls.getInsertSQL()
-        else:
-            sql = cls.getUpdateSQL()
-        data = self.getInstanceData( cls )
-        c = libmysql.db.cursor()
-        print "GovernanceObject.storeInternal: sql = ", sql
-        print "GovernanceObject.storeInternal: data = ", data
-        c.execute( sql, data )
-        insertId = libmysql.db.insert_id()
-        c.close()
-        libmysql.db.commit()
-        return insertId
-
-    def loadInternal( self, cls ):
-        if self.id is None:
-            raise( Exception( "GovernanceObject.loadInternal: ERROR id is NULL" ) )
-        sql = cls.getSelectSQL()
-        sql += "where %s" % ( cls.getIdColumn() )
-        sql += " = %s"
-        c = libmysql.db.cursor()
-        c.execute( sql, ( self.id ) )
-        row = c.fetchone()
-        if row is None:
-            raise( Exception( "GovernanceObject.loadInternal: ERROR row not found for id = %s" % ( self.id ) ) )
-        columns = cls.getColumns()
-        if len( row ) != len( columns ):
-            raise( Exception( "GovernanceObject.loadInternal: ERROR incorrect row length" ) )
-        for i in range( len( columns ) ):
-            setattr( self, columns[i], row[i] )
-
     def isValid( self ):
         # Base class objects aren't valid
         return False
@@ -355,9 +389,11 @@ class Superblock(GovernanceObject):
     def __init__( self, name ):
         GovernanceObject.__init__( self, name )
         self.makeFields( Superblock )
+        self.object_type = govtypes.trigger
         self.subtype = govtypes.trigger
         self.tableName = "superblock"
-        self.superblock_name = ''
+        self.superblock_name = name
+        self.object_name = name
         self.event_block_height = 0
         self.payment_addresses = ''
         self.payment_amounts = ''
@@ -399,6 +435,7 @@ class Superblock(GovernanceObject):
     def load( self ):
         self.loadInternal( GovernanceObject )
         self.loadInternal( Superblock )
+        self.id = self.governance_object_id
 
     def isValid( self ):
         if not ENABLE_SUPERBLOCK_VALIDATION:
@@ -428,9 +465,11 @@ class Proposal(GovernanceObject):
     def __init__( self, name ):
         GovernanceObject.__init__( self, name )
         self.makeFields( Proposal )
+        self.object_type = govtypes.proposal
         self.subtype = govtypes.proposal
         self.tableName = "proposal"
-        self.proposal_name = ''
+        self.proposal_name = name
+        self.object_name = name
         self.start_epoch = 0
         self.end_epoch = 0
         self.payment_address = ''
@@ -473,6 +512,7 @@ class Proposal(GovernanceObject):
     def load( self ):
         self.loadInternal( GovernanceObject )
         self.loadInternal( Proposal )
+        self.id = self.governance_object_id
 
     def isValid( self ):
         if not ENABLE_PROPOSAL_VALIDATION:
@@ -490,6 +530,42 @@ class Proposal(GovernanceObject):
         #  - Check that payment_amount < budget allocation
         return True
 
+class Event(DBObject):
+
+    def __init__( self, govobjId = 0 ):
+        self.makeFields( Event )
+        self.governance_object_id = govobjId
+        self.start_time = 0
+        self.prepare_time = 0
+        self.submit_time = 0
+        self.error_time = 0
+        self.error_message = ''
+
+    @staticmethod
+    def getTableName():
+        return "event"
+
+    @staticmethod
+    def getColumns():
+        columns = [ 'id', 
+                    'governance_object_id',
+                    'start_time',
+                    'prepare_time',
+                    'submit_time',
+                    'error_time',
+                    'error_message' ]
+        return columns
+
+    @staticmethod
+    def getIdColumn():
+        return 'id'
+
+    def load( self ):
+        self.loadInternal( Event )
+
+    def store( self ):
+        self.storeInternal( Event )
+
 class GovernanceFactory:
 
     def __init__( self ):
@@ -497,6 +573,8 @@ class GovernanceFactory:
 
     def create( self, subtype, name ):
         govobj = None
+        if not isinstance( subtype, basestring ):
+            subtype = OBJECT_TYPE_MAP[subtype]
         if subtype == 'trigger':
             govobj = Superblock( name )
         elif subtype == 'proposal':
@@ -509,6 +587,14 @@ class GovernanceFactory:
         govobj = self.create( subtype, None )
         govobj.id = rowId
         govobj.load()
+        return govobj
+
+    def createById( self, rowId ):
+        print "GovernanceFactory.createById: rowId = ", rowId
+        subtype = GovernanceObject.getObjectType( rowId )
+        if subtype is None:
+            return None
+        govobj = self.createFromTable( subtype, rowId )
         return govobj
 
 GFACTORY = GovernanceFactory()
@@ -597,6 +683,7 @@ class CreateSuperblockTask(SentinelTask):
         self.superblock = None
 
     def run( self ):
+        print "CreateSuperblockTask.run START"
         self.superblock = None
         height = getBlockCount()
         cycle = getSuperblockCycle()
@@ -607,10 +694,13 @@ class CreateSuperblockTask(SentinelTask):
             return
         # Check if we've already created this superblock
         if self.superblockCreated():
+            print "CreateSuperblockTask.run Superblock already created, returning"
             return
         proposals = self.getNewProposalsRanked()
+        print "CreateSuperblockTask.run Creating superblock"
         self.createSuperblock( proposals )
         if self.isElected():
+            print "CreateSuperblockTask.run Submitting superblock"
             self.submitSuperblock()
 
     def isElected( self ):
@@ -656,11 +746,13 @@ class CreateSuperblockTask(SentinelTask):
             return
         # We just need to submit the event.  The ProcessEvents task
         # will do the rest of the work.
-        event = Event()
-        event.create_new( self.superblock.id )
-        event.save()
-        libmysql.db.commit()
+        event = Event( self.superblock.id )
+        event.start_time = misc.get_epoch()
+        event.store()
+        print "CreateSuperblockTask.submitSuperblock Submitted event: ", str( event.__dict__ )
         self.superblock.object_status = "SUBMITTED-LOCAL"
+        print "CreateSuperblockTask.submitSuperblock: Calling store, id = ", self.superblock.id
+        self.superblock.store()
         
     def superblockCreated( self ):
         sql = "select object_status, event_block_height from governance_object, superblock where "
@@ -734,9 +826,82 @@ class ProcessEventsTask(SentinelTask):
     def __init__( self ):
         SentinelTask.__init__( self )
 
+    def getEvents( self, prepared ):
+        sql = "select id from event where start_time < NOW() and error_time = 0 and submit_time = 0 "
+        if prepared:
+            sql += " and prepare_time > 0"
+        else:
+            sql += " and prepare_time = 0"
+        c = libmysql.db.cursor()
+        c.execute( sql )
+        rows = c.fetchall()
+        events = []
+        for row in rows:
+            event = Event()
+            event.id = row[0]
+            event.load()
+            events.append( event )
+        return events
+        
+    def doPrepare( self, event ):
+        print "doPrepare: event = ", event.__dict__
+        govobj = GFACTORY.createById( event.governance_object_id )
+        print "doPrepare: govobj = ", govobj.__dict__
+        cmd = "gobject prepare %(object_parent_hash)s %(object_revision)s %(object_creation_time)s %(object_name)s %(object_data)s" % govobj.__dict__
+
+        print "doPrepare: cmd = ", cmd
+
+        result = rpc_command( cmd )
+
+        print "doPrepare: result = ", result
+
+        if misc.is_hash( result ):
+            hashtx = misc.clean_hash( result )
+            print " -- got hash:", hashtx
+            govobj.object_fee_tx = hashtx
+            print "doPrepare: Calling govobj.store, govobj =  ", govobj.__dict__
+            govobj.store()
+            event.prepare_time = misc.get_epoch()
+            event.store()
+        else:
+            print " -- got error:", result
+            event.error_time = misc.get_epoch()
+            # separately update event error message
+            event.error_message = result
+            event.store()
+
+    def doSubmit( self, event ):
+        govobj = GFACTORY.createById( event.governance_object_id )
+        cmd = "gobject submit %(object_fee_tx)s %(object_parent_hash)s %(object_revision)s %(object_creation_time)s %(object_name)s %(object_data)s" % govobj.__dict__
+
+        print "doSubmit: cmd = ", cmd
+
+        if not misc.is_hash( govobj.object_fee_tx ):
+            print "doSubmit: Warning no object_fee_tx hash"
+            return
+
+        result = rpc_command( cmd )
+
+        print "doSubmit: result = ", result
+
+        if misc.is_hash( result ):
+            event.submit_time = misc.get_epoch()
+            event.store()
+        # If the submit call did not succeed assume more confirmations needed
+        # so we will try again later.
+        # TODO: Check for other errors here and set the error fields
+
     def run( self ):
-        crontab.prepare_events()
-        crontab.submit_events()
+        print "ProcessEventsTask.run START"
+        toPrepare = self.getEvents( False )
+        print "ProcessEventsTask.run Number events to prepare = ", len( toPrepare )
+        for event in toPrepare:
+            self.doPrepare( event )
+
+        toSubmit = self.getEvents( True )
+        print "ProcessEventsTask.run Number events to submit = ", len( toSubmit )
+        for event in toSubmit:
+            self.doSubmit( event )
 
 def testSentinel1():
     print "testSentinel1: Start"
