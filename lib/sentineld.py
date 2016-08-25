@@ -305,7 +305,9 @@ class GovernanceObject(DBObject):
         self.yes_count = 0
         self.no_count = 0
         self.object_status = 'UNKNOWN'
-        
+        self.object_origin = 'UNKNOWN'
+        self.is_valid = None
+
     @staticmethod
     def getObjectType( object_id ):
         sql = "select object_type from governance_object where id = %s"
@@ -336,7 +338,9 @@ class GovernanceObject(DBObject):
                     'absolute_yes_count',
                     'yes_count',
                     'no_count',
-                    'object_status' ]
+                    'object_status',
+                    'object_origin',
+                    'is_valid' ]
         return columns
 
     @classmethod
@@ -479,7 +483,7 @@ class Superblock(GovernanceObject):
             return True
         sql = "select governance_object_id, object_status from superblock, governance_object where "
         sql += "event_block_height = %s and "
-        sql += "( object_status = 'NEW-LOCAL' or object_status = 'SUBMITTED-LOCAL' )"
+        sql += "object_origin = 'LOCAL' "
         c = libmysql.db.cursor()
         c.execute( sql, self.event_block_height )
         rows = c.fetchall()
@@ -713,9 +717,10 @@ class UpdateGovernanceTask(SentinelTask):
                 newobjs.append( govobj )
         printd( "UpdateGovernanceTask.run len( newobjs ) = ", len( newobjs ) )
         for obj in newobjs:
-            if not obj.isValid():
-                continue
-            obj.object_status = "NEW-REMOTE"
+            valid = obj.isValid()
+            obj.is_valid = 1 if valid else 0
+            obj.object_status = "NEW"
+            obj.object_origin = "REMOTE"
             obj.store()
 
 class CreateSuperblockTask(SentinelTask):
@@ -795,7 +800,7 @@ class CreateSuperblockTask(SentinelTask):
         event.start_time = misc.get_epoch()
         event.store()
         printd( "CreateSuperblockTask.submitSuperblock Submitted event: ", str( event.__dict__ ) )
-        self.superblock.object_status = "SUBMITTED-LOCAL"
+        self.superblock.object_status = "SUBMITTED"
         printd( "CreateSuperblockTask.submitSuperblock: Calling store, id = ", self.superblock.id )
         self.superblock.store()
         
@@ -803,7 +808,7 @@ class CreateSuperblockTask(SentinelTask):
         sql = "select object_status, event_block_height from governance_object, superblock where "
         sql += "governance_object.id = superblock.governance_object_id and "
         sql += "event_block_height = %s and "
-        sql += "( object_status = 'NEW-LOCAL' or object_status = 'SUBMITTED-LOCAL' )"
+        sql += "object_origin = 'LOCAL' "
         c = libmysql.db.cursor()
         c.execute( sql, self.event_block_height )
         rows = c.fetchall()
@@ -815,10 +820,10 @@ class CreateSuperblockTask(SentinelTask):
         govTable = GovernanceObject.getTableName()
         propTable = Proposal.getTableName()
         sql = "select "
-        sql += "%s.governance_object_id, %s.object_status, %s.absolute_yes_count " % ( propTable, govTable, govTable )
+        sql += "%(propTable)s.governance_object_id " % { 'propTable': propTable }
         sql += "from %s, %s " % ( propTable, govTable )
         sql += "where %s.id = %s.governance_object_id and " % ( govTable, propTable )
-        sql += "object_status = 'NEW-REMOTE' and "
+        sql += "object_status = 'NEW' and object_origin = 'REMOTE' and is_valid = 1 and "
         sql += "%s.absolute_yes_count >= %s " % ( govTable, PROPOSAL_QUORUM )
         sql += "ORDER BY %s.absolute_yes_count " % ( govTable )
         c = libmysql.db.cursor()
@@ -852,7 +857,9 @@ class CreateSuperblockTask(SentinelTask):
         printd( "createSuperblock: payment_amounts = ", payment_amounts )
         superblock.payment_addresses = payment_addresses
         superblock.payment_amounts = payment_amounts
-        superblock.object_status = "NEW-LOCAL"
+        superblock.object_status = "NEW"
+        superblock.object_origin = "LOCAL"
+        superblock.is_valid = 1
         superblock.event_block_height = self.event_block_height
         superblock.updateObjectData()
         superblock.store()
