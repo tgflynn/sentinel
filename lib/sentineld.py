@@ -107,9 +107,6 @@ OBJECT_TYPE_REVERSE_MAP = { "trigger": govtypes.trigger, "proposal": govtypes.pr
 
 DB = libmysql.connect( config.hostname, config.username, config.password, config.database )
 
-print "sys.path = ", sys.path
-print "sentineld: dir( base58 ) = ", dir( base58 )
-
 BASE58_CHARSET = frozenset( [ c for c in base58.b58chars ] )
 
 def printd( *args ):
