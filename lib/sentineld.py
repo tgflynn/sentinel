@@ -4,6 +4,33 @@
 Module for the Sentinel Daemon
 """
 
+### TODO Items as of 2016-08-26 ###
+#
+#  - Implement proposal checks against available budget
+#    (Requires new dashd rpc function)
+#
+#  - Acquire superblock cycle information from dashd
+#    (Requires new dashd rpc function)
+#
+#  - Limit superblock payments to total available budget
+#
+#  - Check rpc submit call for permanent failures and log
+#    error message in event table
+#
+#  - Implement a sentineld debug log
+#
+#  - Implement top level restart on exception
+#
+#  - Check comments for any TODO's not listed here
+#
+#  - Review implementation against spec document
+#    to ensure all functionality defined in the spec
+#    has been implemented
+#
+#  - Other simplifications and/or improvements ?
+#
+### End TODO ###
+
 import sys
 import os
 
