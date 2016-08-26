@@ -20,6 +20,8 @@ Module for the Sentinel Daemon
 #    using floats (we should probably handle these like
 #    dashd does)
 #
+#  - Implement cleanup of old/expired DB objects
+#
 #  - Check rpc submit call for permanent failures and log
 #    error message in event table
 #
