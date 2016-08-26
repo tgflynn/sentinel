@@ -14,6 +14,12 @@ Module for the Sentinel Daemon
 #
 #  - Limit superblock payments to total available budget
 #
+#  - Set PROPOSAL_QUORUM correctly
+#
+#  - Check if there's a better way to handle amounts than
+#    using floats (we should probably handle these like
+#    dashd does)
+#
 #  - Check rpc submit call for permanent failures and log
 #    error message in event table
 #
@@ -27,7 +33,7 @@ Module for the Sentinel Daemon
 #    to ensure all functionality defined in the spec
 #    has been implemented
 #
-#  - Other simplifications and/or improvements ?
+#  - Other simplifications, refactorings and/or improvements ?
 #
 ### End TODO ###
 
@@ -57,7 +63,7 @@ import calendar
 import hashlib
 import re
 
-import base58
+import base58_dash as base58
 
 #from governance import Event
 #from classes import Proposal, Superblock
@@ -80,6 +86,9 @@ SUPERBLOCK_CREATION_DELTA = 1
 
 # Minimum number of absolute yes votes to include a proposal in a superblock
 #PROPOSAL_QUORUM = 10
+# TODO: Should be calculated based on the number of masternodes
+# with an absolute minimum of 10 (maybe 1 for testnet)
+# ie. max( 10, (masternode count)/10 ) 
 PROPOSAL_QUORUM = 0
 
 # For testing, set to True in production
@@ -95,6 +104,9 @@ OBJECT_TYPE_MAP = { govtypes.trigger: "trigger", govtypes.proposal: "proposal" }
 OBJECT_TYPE_REVERSE_MAP = { "trigger": govtypes.trigger, "proposal": govtypes.proposal }
 
 DB = libmysql.connect( config.hostname, config.username, config.password, config.database )
+
+print "sys.path = ", sys.path
+print "sentineld: dir( base58 ) = ", dir( base58 )
 
 BASE58_CHARSET = frozenset( [ c for c in base58.b58chars ] )
 
@@ -186,6 +198,11 @@ def getSuperblockCycle():
     # For now return the testnet value
     #return 24
     return 5
+
+def getSuperblockBudgetAllocation():
+    # TODO: Add dashd rpc call for this
+    # For now return an arbitrary value for testing
+    return 1000
 
 def getCurrentBlockHash():
     height = getBlockCount()
@@ -307,8 +324,8 @@ class DBObject:
         if name not in cls.getColumns():
             raise Exception( "DBObject.getMemberSQL: ERROR Unknown field name: %s" % ( name ) )
         value = self.__dict__[name]
-        if value is None:
-            return "NULL"
+        #if value is None:
+        #    return "NULL"
         return value
 
     def getInstanceData( self, cls ):
@@ -322,11 +339,11 @@ class DBObject:
 
     def store( self ):
         # Overridden in subclasses
-        pass
+        return None
 
     def load( self ):
         # Overridden in subclasses
-        pass
+        return None
 
     def storeInternal( self, cls ):
         data = self.getInstanceData( cls )
@@ -427,10 +444,16 @@ class GovernanceObject(DBObject):
 
     @staticmethod
     def getLocalColumns():
+        # local columns are excluded from the JSON and object hash
         localColumns = frozenset( [ 'id',
                                     'parent_id',
                                     'object_name',
-                                    'object_status' ] )
+                                    'absolute_yes_count',
+                                    'yes_count',
+                                    'no_count',
+                                    'object_status',
+                                    'object_origin',
+                                    'is_valid' ] )
         return localColumns
 
     @staticmethod
@@ -486,7 +509,7 @@ class GovernanceObject(DBObject):
     def existsInDb( self ):
         if len( self.object_hash ) < 1:
             return False
-        sql = GovernanceObject.getSelectSQL() + " where object_hash = %s"
+        sql = GovernanceObject.getSelectSQL() + " where object_hash = %s and object_origin = 'REMOTE' "
         #print "existsInDb: sql = ", sql
         c = libmysql.db.cursor()
         c.execute( sql, ( self.object_hash ) )
@@ -533,6 +556,9 @@ class Superblock(GovernanceObject):
 
     @staticmethod
     def getLocalColumns():
+        # Note: superblock_name is excluded from the JSON and object hash
+        # because it is randomly generated and isn't essential
+        # to superblock identity
         localColumns = frozenset( [ 'id',
                                     'governance_object_id',
                                     'superblock_name' ] )
@@ -547,6 +573,7 @@ class Superblock(GovernanceObject):
         self.initObjectId( insertId )
         self.storeInternal( Superblock )
         self.id = insertId
+        return self.id
 
     def load( self ):
         self.loadInternal( GovernanceObject )
@@ -562,6 +589,10 @@ class Superblock(GovernanceObject):
         c = libmysql.db.cursor()
         c.execute( sql, self.event_block_height )
         rows = c.fetchall()
+        if len( rows ) == 0:
+            # If we have no local superblock for this event_block_height
+            # we make no decision on validity (implies no vote).
+            return None
         if len( rows ) != 1:
             # Something's wrong if this query returns more than 1 row and if it returns
             # no rows we have nothing to validate against so return False in both cases
@@ -608,9 +639,11 @@ class Proposal(GovernanceObject):
 
     @staticmethod
     def getLocalColumns():
+        # Note: proposal_name is included in JSON and object hash
+        # because it is set manually and is essential to a proposal's
+        # identity.
         localColumns = frozenset( [ 'id',
-                                    'governance_object_id',
-                                    'proposal_name' ] )
+                                    'governance_object_id' ] )
         return localColumns
 
     @staticmethod
@@ -622,6 +655,7 @@ class Proposal(GovernanceObject):
         self.initObjectId( insertId )
         self.storeInternal( Proposal )
         self.id = insertId
+        return self.id
 
     def load( self ):
         self.loadInternal( GovernanceObject )
@@ -645,8 +679,17 @@ class Proposal(GovernanceObject):
         if not validateDashAddress( self.payment_address ):
             printd( "Proposal.isValid Invalid payment address: %s" % ( self.payment_address ) )
             return False
-        # TODO
-        #  - Check that payment_amount < budget allocation
+
+        # TODO: Should we be using floats here or treat decimals properly
+        try:
+            amountValue = float( self.payment_amount )
+        except:
+            printd( "Proposal.isValid Failed to parse amount: %s" % ( self.payment_amount ) )
+            return False
+
+        if amountValue > getSuperblockBudgetAllocation():
+            return False
+
         return True
 
 class Event(DBObject):
@@ -683,7 +726,7 @@ class Event(DBObject):
         self.loadInternal( Event )
 
     def store( self ):
-        self.storeInternal( Event )
+        return self.storeInternal( Event )
 
 class GovernanceFactory:
 
@@ -800,7 +843,7 @@ class UpdateGovernanceTask(SentinelTask):
         printd( "UpdateGovernanceTask.run len( newobjs ) = ", len( newobjs ) )
         for obj in newobjs:
             valid = obj.isValid()
-            obj.is_valid = 1 if valid else 0
+            obj.is_valid = valid
             obj.object_status = "NEW"
             obj.object_origin = "REMOTE"
             obj.store()
@@ -925,7 +968,16 @@ class CreateSuperblockTask(SentinelTask):
     def createSuperblock( self, proposals ):
         printd( "createSuperblock: Start, len( proposals ) = ", len( proposals ) )
         payments = []
+        allocated = 0.0
+        budget = getSuperblockBudgetAllocation()
         for proposal in proposals:
+            # TODO: Note: unparseable amounts should have been rejected
+            #       as invalid, but should we be using floats here
+            #       (see previous comments).
+            amountValue = float( proposal.payment_amount )
+            allocated += amountValue
+            if allocated > budget:
+                break
             payment = { 'address': proposal.payment_address,
                         'amount': proposal.payment_amount }
             payments.append( payment )
