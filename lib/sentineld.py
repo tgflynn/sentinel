@@ -56,7 +56,7 @@ SUPERBLOCK_CREATION_DELTA = 1
 PROPOSAL_QUORUM = 0
 
 # For testing, set to True in production
-ENABLE_PROPOSAL_VALIDATION = False
+ENABLE_PROPOSAL_VALIDATION = True
 
 # For testing, set to True in production
 ENABLE_SUPERBLOCK_VALIDATION = True
@@ -67,7 +67,9 @@ ENABLE_WIN_ALL_ELECTIONS = True
 OBJECT_TYPE_MAP = { govtypes.trigger: "trigger", govtypes.proposal: "proposal" }
 OBJECT_TYPE_REVERSE_MAP = { "trigger": govtypes.trigger, "proposal": govtypes.proposal }
 
-DB = libmysql.connect(config.hostname, config.username, config.password, config.database)
+DB = libmysql.connect( config.hostname, config.username, config.password, config.database )
+
+BASE58_CHARSET = frozenset( [ c for c in base58.b58chars ] )
 
 def printd( *args ):
     if DEBUG:
@@ -76,7 +78,26 @@ def printd( *args ):
 
 def validateDashAddress( address ):
     # Only public key addresses are allowed 
+    # A valid address is a RIPEMD-160 hash which contains 20 bytes
+    # Prior to base58 encoding 1 version byte is prepended and
+    # 4 checksum bytes are appended so the total number of
+    # base58 encoded bytes should be 25.  This means the number of characters
+    # in the encoding should be about 34 ( 25 * log2( 256 ) / log2( 58 ) ).
     validVersion = 76 if not TESTNET else 140
+    print "validateDashAddress: address = ", address
+
+    # Check length (This is important because the base58 librray has problems
+    # with long addresses (which are invalid anyway).
+    if ( ( len( address ) < 34 ) or ( len( address ) > 35 ) ):
+        return False
+
+    # Check that characters are valid, otherwise base58 library
+    # will probably throw an exception.
+    # Would using a compiled regex be faster than this ?
+    for c in address:
+        if c not in BASE58_CHARSET:
+            return False
+
     version = base58.get_bcaddress_version( address )
     if version is None:
         return False
@@ -160,6 +181,7 @@ class DBObject:
 
     def __init__( self ):
         pass
+        self.id = None
 
     def makeFields( self, cls ):
         columns = cls.getColumns()
@@ -226,8 +248,33 @@ class DBObject:
             sql += cname + " = %s"
             if i < ( len( columns ) - 1 ):
                 sql += ", "
-        sql += " where id = %s"
+        sql += " where %s " % ( cls.getIdColumn() ) 
+        sql += " = %s"
         return sql
+
+    def isNew( self ):
+        print "isNew: self.id = ", self.id
+        return ( self.id is None )
+
+    def getObjectId( self, cls ):
+        idColumn = cls.getIdColumn()
+        objectId = self.__dict__.get( idColumn )
+        return objectId
+
+    def setObjectId( self, objectId ):
+        """Sets both the id for the base governance class and for the subclass"""
+        idColumn = self.getIdColumn()
+        setattr( self, idColumn, objectId )
+        self.id = objectId
+        
+    def initObjectId( self, objectId ):
+        """Sets the id for the subclass only if not already set"""
+        idColumn = self.getIdColumn()
+        currentObjectId = getattr( self, idColumn, None )
+        if ( ( currentObjectId is not None ) and
+             ( self.id is not None ) ):
+            return
+        setattr( self, idColumn, objectId )
 
     def getMemberSQL( self, cls, name ):
         if name not in cls.getColumns():
@@ -256,11 +303,12 @@ class DBObject:
 
     def storeInternal( self, cls ):
         data = self.getInstanceData( cls )
-        if self.id is None:
+        objectId = self.getObjectId( cls )
+        if self.isNew():
             sql = cls.getInsertSQL()
         else:
             sql = cls.getUpdateSQL()
-            data.append( self.id )
+            data.append( objectId )
         c = libmysql.db.cursor()
         printd( "DBObject.storeInternal: sql = ", sql )
         printd( "DBObject.storeInternal: data = ", data )
@@ -271,20 +319,23 @@ class DBObject:
         return insertId
 
     def loadInternal( self, cls ):
-        if self.id is None:
+        objectId = self.getObjectId( cls )
+        printd( "DBObject.loadInternal: cls = %s, objectId = %s" % ( cls, objectId ) )
+        if objectId is None:
             raise( Exception( "DBObject.loadInternal: ERROR id is NULL" ) )
         sql = cls.getSelectSQL()
         sql += "where %s" % ( cls.getIdColumn() )
         sql += " = %s"
+        printd( "DBObject.loadInternal: sql = ", sql )
         c = libmysql.db.cursor()
-        c.execute( sql, ( self.id ) )
+        c.execute( sql, ( objectId ) )
         row = c.fetchone()
         if row is None:
-            raise( Exception( "DBObject.loadInternal: ERROR row not found for id = %s" % ( self.id ) ) )
+            raise( Exception( "DBObject.loadInternal: ERROR row not found for id = %s" % ( objectId ) ) )
         columns = cls.getColumns()
         if len( row ) != len( columns ):
             raise( Exception( "DBObject.loadInternal: ERROR incorrect row length" ) )
-        for i in range( len( columns ) ):
+        for i in range( 1, len( columns ) ):
             setattr( self, columns[i], row[i] )
 
 class GovernanceObject(DBObject):
@@ -415,10 +466,10 @@ class GovernanceObject(DBObject):
         result = c.fetchone()
         c.close()
         if result is None:
-            self.id = None
+            self.setObjectId( None )
             return False
         else:
-            self.id = result[0]
+            self.setObjectId( result[0] )
             return True
 
     def isValid( self ):
@@ -445,7 +496,7 @@ class Superblock(GovernanceObject):
 
     @staticmethod
     def getColumns():
-        columns = [ 'id', 
+        columns = [ 'id',
                     'governance_object_id',
                     'superblock_name',
                     'event_block_height',
@@ -466,17 +517,14 @@ class Superblock(GovernanceObject):
 
     def store( self ):
         insertId = self.storeInternal( GovernanceObject )
-        if self.governance_object_id is None:
-            self.governance_object_id = insertId
+        self.initObjectId( insertId )
         self.storeInternal( Superblock )
-        if self.id is None:
-            self.id = insertId
-        self.governance_id = self.id
+        self.id = insertId
 
     def load( self ):
         self.loadInternal( GovernanceObject )
         self.loadInternal( Superblock )
-        self.id = self.governance_object_id
+        self.setObjectId( self.id )
 
     def isValid( self ):
         if not ENABLE_SUPERBLOCK_VALIDATION:
@@ -522,7 +570,7 @@ class Proposal(GovernanceObject):
 
     @staticmethod
     def getColumns():
-        columns = [ 'id', 
+        columns = [ 'id',
                     'governance_object_id',
                     'proposal_name',
                     'start_epoch',
@@ -544,29 +592,31 @@ class Proposal(GovernanceObject):
 
     def store( self ):
         insertId = self.storeInternal( GovernanceObject )
-        if self.governance_object_id is None:
-            self.governance_object_id = insertId            
+        self.initObjectId( insertId )
         self.storeInternal( Proposal )
-        if self.id is None:
-            self.id = insertId
+        self.id = insertId
 
     def load( self ):
         self.loadInternal( GovernanceObject )
         self.loadInternal( Proposal )
-        self.id = self.governance_object_id
+        self.setObjectId( self.id )
 
     def isValid( self ):
         if not ENABLE_PROPOSAL_VALIDATION:
             return True
         # Check name
-        if not re.match( r'^[a-zA-Z0-9]+$', self.proposal_name ):
+        if not re.match( r'^[-_a-zA-Z0-9]+$', self.proposal_name ):
+            printd( "Proposal.isValid Invalid proposal name format: proposal_name = ", self.proposal_name )
             return False
         now = calendar.timegm( time.gmtime() )
         if self.end_epoch <= now:
+            printd( "Proposal.isValid Invalid end_epoch(%s) <= now(%s) " % ( self.end_epoch, now ) )
             return False
         if self.end_epoch <= self.start_epoch:
+            printd( "Proposal.isValid Invalid end_epoch(%s) <= start_epoch(%s) " % ( self.end_epoch, self.start_epoch ) )
             return False
         if not validateDashAddress( self.payment_address ):
+            printd( "Proposal.isValid Invalid payment address: %s" % ( self.payment_address ) )
             return False
         # TODO
         #  - Check that payment_amount < budget allocation
@@ -625,18 +675,23 @@ class GovernanceFactory:
             raise( Exception( "GovernanceFactory.create: ERROR Unknown subtype: %s" % ( subtype ) ) )
         return govobj
 
-    def createFromTable( self, subtype, rowId ):
+    def createFromTable( self, subtype, objectId ):
+        printd( "GovernanceFactory.createFromTable Start subtype = %s, objectId = %s" % ( subtype, objectId ) )
         govobj = self.create( subtype, None )
-        govobj.id = rowId
+        govobj.setObjectId( objectId )
+        printd( "GovernanceFactory.createFromTable Before load, govobj = " % govobj.__dict__ )
+        assert( govobj.id == objectId )
         govobj.load()
+        printd( "GovernanceFactory.createFromTable After load, govobj = " % govobj.__dict__ )
+        assert( govobj.id == objectId )
         return govobj
 
-    def createById( self, rowId ):
-        printd( "GovernanceFactory.createById: rowId = ", rowId )
-        subtype = GovernanceObject.getObjectType( rowId )
+    def createById( self, objectId ):
+        printd( "GovernanceFactory.createById: objectId = ", objectId )
+        subtype = GovernanceObject.getObjectType( objectId )
         if subtype is None:
             return None
-        govobj = self.createFromTable( subtype, rowId )
+        govobj = self.createFromTable( subtype, objectId )
         return govobj
 
 GFACTORY = GovernanceFactory()
@@ -745,6 +800,10 @@ class CreateSuperblockTask(SentinelTask):
             printd( "CreateSuperblockTask.run Superblock already created, returning" )
             return
         proposals = self.getNewProposalsRanked()
+        if len( proposals ) < 1:
+            # Don't create empty superblocks
+            printd( "CreateSuperblockTask.run No new proposals, returning" )
+            return
         printd( "CreateSuperblockTask.run Creating superblock" )
         self.createSuperblock( proposals )
         if self.isElected():
@@ -803,6 +862,7 @@ class CreateSuperblockTask(SentinelTask):
         self.superblock.object_status = "SUBMITTED"
         printd( "CreateSuperblockTask.submitSuperblock: Calling store, id = ", self.superblock.id )
         self.superblock.store()
+        self.superblock = None
         
     def superblockCreated( self ):
         sql = "select object_status, event_block_height from governance_object, superblock where "
@@ -864,14 +924,59 @@ class CreateSuperblockTask(SentinelTask):
         superblock.updateObjectData()
         superblock.store()
         self.superblock = superblock
+        printd( "createSuperblock: End, self.superblock.id = ", self.superblock.id )
 
-class VoteSuperblocksTask(SentinelTask):
+class AutoVoteTask(SentinelTask):
 
     def __init__( self ):
         SentinelTask.__init__( self )
 
     def run( self ):
-        pass
+        self.voteValidSuperblocks()
+        self.voteInvalidObjects()
+
+    def voteValidSuperblocks( self ):
+        superblocks = self.getValidSuperblocks()
+        for superblock in superblocks:
+            self.vote( superblock, 'funding', 'yes' )
+
+    def voteInvalidObjects( self ):
+        invalidObjects = self.getInvalidObjects()
+        for obj in invalidObjects:
+            self.vote( obj, 'valid', 'no' )
+
+    def vote( self, govObj, signal, outcome ):
+        objHash = govObj.object_hash
+        if not misc.is_hash( objHash ):
+            raise( Exception( "AutoVoteTask.vote ERROR: Missing object hash for object: %s" % ( govObj.__dict__ ) ) )
+        command = "gobject vote-conf %s %s %s" % ( objHash, signal, outcome )
+        printd( "vote: command = ", command )
+        rpc_command( command )
+        govObj.object_status = 'VOTED'
+        govObj.store()            
+        
+    def getInvalidObjects( self ):
+        sql = "select id from governance_object where is_valid = 0 and object_origin = 'REMOTE' and object_status = 'NEW' "
+        c = libmysql.db.cursor()
+        c.execute( sql )
+        rows = c.fetchall()
+        invalidObjects = []
+        for row in rows:
+            govobj = GFACTORY.createById( row[0] )
+            invalidObjects.append( govobj )
+        return invalidObjects
+
+    def getValidSuperblocks( self ):
+        sql = "select id from governance_object where object_type = %s and "
+        sql += "is_valid = 1 and object_origin = 'REMOTE' and object_status = 'NEW' "
+        c = libmysql.db.cursor()
+        c.execute( sql, govtypes.trigger )
+        rows = c.fetchall()
+        superblocks = []
+        for row in rows:
+            govobj = GFACTORY.createById( row[0] )
+            superblocks.append( govobj )
+        return superblocks
 
 class ProcessEventsTask(SentinelTask):
 
@@ -890,7 +995,7 @@ class ProcessEventsTask(SentinelTask):
         events = []
         for row in rows:
             event = Event()
-            event.id = row[0]
+            event.setObjectId( row[0] )
             event.load()
             events.append( event )
         return events
@@ -939,6 +1044,8 @@ class ProcessEventsTask(SentinelTask):
         if misc.is_hash( result ):
             event.submit_time = misc.get_epoch()
             event.store()
+            govobj.object_hash = result
+            govobj.store()
         # If the submit call did not succeed assume more confirmations needed
         # so we will try again later.
         # TODO: Check for other errors here and set the error fields
@@ -961,6 +1068,7 @@ def testSentinel1():
     taskList = SentinelTaskList( GOVERNANCE_UPDATE_PERIOD_SECONDS )
     taskList.addTask( UpdateGovernanceTask() )
     taskList.addTask( CreateSuperblockTask() )
+    taskList.addTask( AutoVoteTask() )
     sentineld.addTask( taskList )
     sentineld.addTask( ProcessEventsTask() )
     sentineld.run()
