@@ -580,9 +580,12 @@ class Superblock(GovernanceObject):
         self.setObjectId( self.id )
 
     def isValid( self ):
+        printd( "Superblock.isValid name = ", self.superblock_name )
         if not ENABLE_SUPERBLOCK_VALIDATION:
+            printd( "Superblock.isValid Validation disabled, returning True" )
             return True
         sql = "select governance_object_id, object_status from superblock, governance_object where "
+        sql += "superblock.governance_object_id = governance_object.id and "
         sql += "event_block_height = %s and "
         sql += "object_origin = 'LOCAL' "
         c = libmysql.db.cursor()
@@ -591,19 +594,24 @@ class Superblock(GovernanceObject):
         if len( rows ) == 0:
             # If we have no local superblock for this event_block_height
             # we make no decision on validity (implies no vote).
+            printd( "Superblock.isValid No local match, returning None" )
             return None
         if len( rows ) != 1:
-            # Something's wrong if this query returns more than 1 row and if it returns
-            # no rows we have nothing to validate against so return False in both cases
+            # Something's wrong if this query returns more than 1 row so return False
+            printd( "Superblock.isValid Too many matching rows, returning False" )
             return False
         row = rows[0]
         localSuperblock = GFACTORY.createFromTable( 'trigger', row[0] )
         if localSuperblock.event_block_height != self.event_block_height:
+            printd( "Superblock.isValid Invalid superblock: event_block_heignt doesn't match, returning False" )
             return False
         if localSuperblock.payment_addresses != self.payment_addresses:
+            printd( "Superblock.isValid Invalid superblock: payment_addresses don't match, returning False" )
             return False
         if localSuperblock.payment_amounts != self.payment_amounts:
+            printd( "Superblock.isValid Invalid superblock: payment_amounts don't match, returning False" )
             return False
+        printd( "Superblock.isValid returning True" )
         return True
 
 class Proposal(GovernanceObject):
