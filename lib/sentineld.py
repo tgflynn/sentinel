@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python
 
 """
@@ -195,8 +196,7 @@ def getBlockCount():
 def getSuperblockCycle():
     # TODO: Add dashd rpc call for this
     # For now return the testnet value
-    #return 24
-    return 5
+    return 24
 
 def getSuperblockBudgetAllocation():
     # TODO: Add dashd rpc call for this
@@ -1090,6 +1090,13 @@ class ProcessEventsTask(SentinelTask):
         printd( "doPrepare: event = ", event.__dict__ )
         govobj = GFACTORY.createById( event.governance_object_id )
         printd( "doPrepare: govobj = ", govobj.__dict__ )
+
+        if isinstance( govobj, Superblock ):
+            # Superblocks now require no preparation
+            event.prepare_time = misc.get_epoch()
+            event.store()
+            return
+
         cmd = "gobject prepare %(object_parent_hash)s %(object_revision)s %(object_creation_time)s %(object_name)s %(object_data)s" % govobj.__dict__
 
         printd( "doPrepare: cmd = ", cmd )
@@ -1115,13 +1122,17 @@ class ProcessEventsTask(SentinelTask):
 
     def doSubmit( self, event ):
         govobj = GFACTORY.createById( event.governance_object_id )
-        cmd = "gobject submit %(object_fee_tx)s %(object_parent_hash)s %(object_revision)s %(object_creation_time)s %(object_name)s %(object_data)s" % govobj.__dict__
+
+        if isinstance( govobj, Superblock ):
+            # Fee no longer needed for Superblocks
+            cmd = "gobject submit %(object_parent_hash)s %(object_revision)s %(object_creation_time)s %(object_name)s %(object_data)s" % govobj.__dict__
+        else:
+            cmd = "gobject submit %(object_parent_hash)s %(object_revision)s %(object_creation_time)s %(object_name)s %(object_data)s %(object_fee_tx)s" % govobj.__dict__
+            if not misc.is_hash( govobj.object_fee_tx ):
+                printd( "doSubmit: Warning no object_fee_tx hash" )
+                return
 
         printd( "doSubmit: cmd = ", cmd )
-
-        if not misc.is_hash( govobj.object_fee_tx ):
-            printd( "doSubmit: Warning no object_fee_tx hash" )
-            return
 
         result = rpc_command( cmd )
 
